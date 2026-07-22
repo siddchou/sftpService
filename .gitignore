@@ -1,0 +1,15 @@
+# Credentials — never commit real secrets
+config/credentials.yml
+
+# SSH keys
+keys/
+
+# Logs
+logs/
+
+# Shell history
+*.sh~
+*~
+
+# IDE
+.idea/

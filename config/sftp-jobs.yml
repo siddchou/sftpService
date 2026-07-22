@@ -1,0 +1,39 @@
+# SFTP Job Definitions
+# Each entry mirrors a STEP_CONFIG stored in the orchestrator database.
+#
+# Fields:
+#   name              — unique job identifier
+#   host              — SFTP server hostname or IP
+#   port              — SSH port (default: 22)
+#   username          — remote user
+#   credential_ref    — key into credentials.yml
+#   remote_dir        — remote working directory
+#   file_pattern      — glob filter for files to transfer
+#   direction         — UPLOAD or DOWNLOAD
+#   remote_file_name  — rename template (UPLOAD only). Placeholders:
+#                       ${fileName}, ${fileExtension}, ${timestamp}
+#   working_dir       — local directory for file staging (default: SFTP_WORKING_DIR)
+#   conn_timeout      — connection timeout in seconds (default: SFTP_CONN_TIMEOUT)
+#   auth_timeout      — authentication timeout in seconds (default: SFTP_AUTH_TIMEOUT)
+
+jobs:
+  - name: upload-reports
+    host: sftp.example.com
+    port: 22
+    username: deployer
+    credential_ref: prod_sftp_key
+    remote_dir: /incoming/reports
+    file_pattern: "*.csv"
+    direction: UPLOAD
+    remote_file_name: "${fileName}_${timestamp}.${fileExtension}"
+    working_dir: /opt/sftp-service/data/reports
+
+  - name: fetch-backups
+    host: backup.internal.net
+    port: 2222
+    username: backup-agent
+    credential_ref: backup_password
+    remote_dir: /exports/daily
+    file_pattern: "backup_*.tar.gz"
+    direction: DOWNLOAD
+    working_dir: /opt/sftp-service/data/backups
