@@ -15,40 +15,88 @@ source "${SFTP_ROOT}/lib/sftp-core.sh"
 
 install_cancel_trap
 
-# Rotate old logs before starting
+# ── Parse args ───────────────────────────────────────────────────────────────
+
+ENV_PROFILE=""
+JOB_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e|--env)
+      ENV_PROFILE="$2"; shift 2 ;;
+    -e*)
+      ENV_PROFILE="${1#-e}"; shift ;;
+    --)
+      shift; JOB_NAME="${1:-}" ; break ;;
+    -*)
+      die "Unknown option: $1. Usage: sftp-run.sh [-e <env>] <job-name>" ;;
+    *)
+      JOB_NAME="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$JOB_NAME" ]]; then
+  die "Usage: sftp-run.sh [-e <env>] <job-name>"
+fi
+
+# ── Load environment profile ─────────────────────────────────────────────────
+
+if [[ -n "$ENV_PROFILE" ]]; then
+  ENV_CONF="${SFTP_ROOT}/config/env/${ENV_PROFILE}.conf"
+  if [[ -f "$ENV_CONF" ]]; then
+    log_info "Loading environment profile: ${ENV_PROFILE}"
+    # shellcheck source=/dev/null
+    source "$ENV_CONF"
+  else
+    die "Environment config not found: ${ENV_CONF}"
+  fi
+
+  # Re-create log dir after env override may have changed it
+  mkdir -p "$SFTP_LOG_DIR"
+
+  # Set per-environment credential file
+  CRED_FILE="${SFTP_ROOT}/config/credentials.${ENV_PROFILE}.yml"
+else
+  ENV_PROFILE="default"
+  CRED_FILE="${SFTP_ROOT}/config/credentials.yml"
+fi
+
+# ── Rotate old logs before starting ──────────────────────────────────────────
+
 log_rotate
 
-JOB_NAME="${1:?Usage: sftp-run.sh <job-name>}"
+# ── Read merged job config ───────────────────────────────────────────────────
 
-# Read job config and write to temp file (sftp-core expects a file path)
 JOB_JSON_FILE="$(mktemp)"
 trap "rm -f '$JOB_JSON_FILE'" EXIT
 
-yq_read_job "$JOB_NAME" > "$JOB_JSON_FILE"
+yq_read_job "$JOB_NAME" "$ENV_PROFILE" > "$JOB_JSON_FILE"
 
-# Verify we got something
 if [[ ! -s "$JOB_JSON_FILE" ]]; then
-  die "Job '$JOB_NAME' not found in sftp-jobs.yml"
+  die "Job '$JOB_NAME' not found in sftp-jobs.yml${ENV_PROFILE:+ (or sftp-jobs.${ENV_PROFILE}.yml)}"
 fi
 
-# Set up per-job log file
-JOB_DIR="$(yq -r '.remote_dir // empty' "$JOB_JSON_FILE")"
+# ── Set up per-job log file ──────────────────────────────────────────────────
+
 JOB_HOST="$(yq -r '.host' "$JOB_JSON_FILE")"
-LOG_FILE="${SFTP_LOG_DIR}/${JOB_NAME}_$(date '+%Y%m%d').log"
+LOG_FILE="${SFTP_LOG_DIR}/${ENV_PROFILE}_${JOB_NAME}_$(date '+%Y%m%d').log"
 log_set_file "$LOG_FILE"
 
-log_info "=== Starting job: ${JOB_NAME} ==="
+log_info "=== Starting job: ${JOB_NAME} (env=${ENV_PROFILE}) ==="
 log_info "Host: ${JOB_HOST}, Log: ${LOG_FILE}"
 
-# Resolve credential
+# ── Resolve credential ───────────────────────────────────────────────────────
+
 CRED_REF="$(yq -r '.credential_ref' "$JOB_JSON_FILE")"
 AUTH_VALUE="$(resolve_credential "$CRED_REF")"
 
-# Build connection
-sftp_build_cmd < "$JOB_JSON_FILE"
-log_debug "Connection ready: ${_sftp_cmd}"
+# ── Build connection ─────────────────────────────────────────────────────────
 
-# Dispatch to upload or download
+sftp_build_cmd < "$JOB_JSON_FILE"
+log_debug "Connection ready"
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+
 DIRECTION="$(yq -r '.direction' "$JOB_JSON_FILE")"
 
 case "$DIRECTION" in
@@ -63,4 +111,4 @@ case "$DIRECTION" in
     ;;
 esac
 
-log_info "=== Job '${JOB_NAME}' complete ==="
+log_info "=== Job '${JOB_NAME}' (env=${ENV_PROFILE}) complete ==="

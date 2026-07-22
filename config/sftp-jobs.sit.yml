@@ -1,0 +1,15 @@
+# sit job overrides — merged on top of sftp-jobs.yml
+jobs:
+  - name: upload-reports
+    host: sit-sftp.example.com
+    port: 22
+    username: sit-deployer
+    credential_ref: sit_sftp_key
+    working_dir: /opt/sftp-service/data/sit/reports
+
+  - name: fetch-backups
+    host: sit-backup.example.com
+    port: 22
+    username: sit-backup
+    credential_ref: sit_backup_password
+    working_dir: /opt/sftp-service/data/sit/backups

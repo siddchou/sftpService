@@ -17,10 +17,6 @@ mkdir -p "$SFTP_LOG_DIR"
 
 # ── Log Rotation ─────────────────────────────────────────────────────────────
 
-# Rotate old logs:
-#  1. Delete .log and .log.gz files older than SFTP_LOG_RETENTION_DAYS.
-#  2. If the current day's log for any job exceeds SFTP_LOG_MAX_SIZE_KB,
-#     compress a copy and truncate the live file so the job can continue writing.
 log_rotate() {
   log_debug "Log rotation: retention=${SFTP_LOG_RETENTION_DAYS}d, max=${SFTP_LOG_MAX_SIZE_KB}KB"
 
@@ -33,7 +29,7 @@ log_rotate() {
     | while IFS= read -r big_log; do
       local rotated="${big_log}.$(date '+%Y%m%d_%H%M%S').gz"
       gzip -c "$big_log" > "$rotated" 2>/dev/null || true
-      : > "$big_log"  # truncate
+      : > "$big_log"
       log_debug "Rotated ${big_log} -> ${rotated}"
     done
 }
@@ -91,20 +87,16 @@ timestamp() {
   date '+%Y%m%d_%H%M%S'
 }
 
-# Strip extension from filename.
 file_base() {
   local f="${1##*/}"
   echo "${f%.*}"
 }
 
-# Get extension from filename.
 file_ext() {
   local f="${1##*/}"
   echo "${f##*.}"
 }
 
-# Expand remote file name template.
-# Supports: ${fileName}, ${fileExtension}, ${timestamp}
 expand_template() {
   local template="$1"
   local src_file="$2"
@@ -118,19 +110,34 @@ expand_template() {
   echo "$template"
 }
 
-# ── YAML helpers (lightweight, no external deps beyond yq) ───────────────────
+# ── YAML helpers ─────────────────────────────────────────────────────────────
 
 require_yq() {
   require_cmd yq
 }
 
-# Read a job config block from sftp-jobs.yml and return as JSON.
+# Read a job config block from sftp-jobs.yml, merged with env override if present.
+# Args: <job-name> [env-profile]
 yq_read_job() {
   local job_name="$1"
+  local env_profile="${2:-}"
   local jobs_file="${SFTP_ROOT}/config/sftp-jobs.yml"
-  [[ -f "$jobs_file" ]] || die "Job definitions file not found: $jobs_file"
+  [[ -f "$jobs_file" ]] || die "Base job definitions file not found: $jobs_file"
   require_yq
-  yq -o json ".jobs[] | select(.name == \"$job_name\")" "$jobs_file"
+
+  if [[ -n "$env_profile" ]]; then
+    local env_file="${SFTP_ROOT}/config/sftp-jobs.${env_profile}.yml"
+    if [[ -f "$env_file" ]]; then
+      # Merge: env override wins for same job name
+      yq -o json -n \
+        "$(yq -o json "$jobs_file") *+ $(yq -o json "$env_file")" \
+        | yq -o json ".jobs[] | select(.name == \"$job_name\")"
+    else
+      yq -o json ".jobs[] | select(.name == \"$job_name\")" "$jobs_file"
+    fi
+  else
+    yq -o json ".jobs[] | select(.name == \"$job_name\")" "$jobs_file"
+  fi
 }
 
 # ── Signal handling ──────────────────────────────────────────────────────────

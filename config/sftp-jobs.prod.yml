@@ -1,0 +1,15 @@
+# prod job overrides — merged on top of sftp-jobs.yml
+jobs:
+  - name: upload-reports
+    host: prod-sftp.example.com
+    port: 22
+    username: prod-deployer
+    credential_ref: prod_sftp_key
+    working_dir: /opt/sftp-service/data/prod/reports
+
+  - name: fetch-backups
+    host: prod-backup.example.com
+    port: 2222
+    username: prod-backup
+    credential_ref: prod_backup_password
+    working_dir: /opt/sftp-service/data/prod/backups

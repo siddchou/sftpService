@@ -1,0 +1,15 @@
+# uat job overrides — merged on top of sftp-jobs.yml
+jobs:
+  - name: upload-reports
+    host: uat-sftp.example.com
+    port: 22
+    username: uat-deployer
+    credential_ref: uat_sftp_key
+    working_dir: /opt/sftp-service/data/uat/reports
+
+  - name: fetch-backups
+    host: uat-backup.example.com
+    port: 22
+    username: uat-backup
+    credential_ref: uat_backup_password
+    working_dir: /opt/sftp-service/data/uat/backups

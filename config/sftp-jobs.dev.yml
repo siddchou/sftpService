@@ -1,0 +1,15 @@
+# dev job overrides — merged on top of sftp-jobs.yml
+jobs:
+  - name: upload-reports
+    host: dev-sftp.example.local
+    port: 22
+    username: dev-deployer
+    credential_ref: dev_sftp_key
+    working_dir: /opt/sftp-service/data/dev/reports
+
+  - name: fetch-backups
+    host: dev-backup.local
+    port: 22
+    username: dev-backup
+    credential_ref: dev_backup_password
+    working_dir: /opt/sftp-service/data/dev/backups

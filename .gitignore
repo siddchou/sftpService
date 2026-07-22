@@ -1,5 +1,5 @@
 # Credentials — never commit real secrets
-config/credentials.yml
+config/credentials*.yml
 
 # SSH keys
 keys/

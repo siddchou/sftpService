@@ -13,7 +13,7 @@ source "${SFTP_ROOT}/lib/credential.sh"
 
 usage() {
   cat <<EOF
-Usage: sftp-credential.sh <command> [args...]
+Usage: sftp-credential.sh [-e <env>] <command> [args...]
 
 Commands:
   add <ref> <type> <value>       Encrypt and store a credential
@@ -25,19 +25,48 @@ Commands:
   encrypt <plaintext>            Encrypt a value and print to stdout
   decrypt <encrypted_value>      Decrypt a value and print to stdout
 
+Options:
+  -e, --env <env>                Target environment (dev, sit, uat, prod)
+                                 Uses credentials.<env>.yml instead of credentials.yml
+
 Environment:
   ORCHESTRATOR_ENCRYPTION_KEY    64-char hex string (32-byte AES-256 key)
-  CRED_FILE                      Path to credentials.yml (default: config/credentials.yml)
 
 Examples:
-  sftp-credential.sh add prod_sftp_key SSH_KEY "/opt/sftp-service/keys/prod_ed25519"
-  sftp-credential.sh add backup_pass PASSWORD "s3cret"
-  sftp-credential.sh list
+  sftp-credential.sh -e prod add prod_sftp_key SSH_KEY "/opt/sftp-service/keys/prod_ed25519"
+  sftp-credential.sh -e dev add dev_pass PASSWORD "dev-secret"
+  sftp-credential.sh -e prod list
   sftp-credential.sh gen-key myserver ed25519
-  sftp-credential.sh encrypt "my-password"
-  sftp-credential.sh decrypt "ENC[AESGCM;...]"
 EOF
 }
+
+# ── Parse args ───────────────────────────────────────────────────────────────
+
+ENV_PROFILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e|--env)
+      ENV_PROFILE="$2"; shift 2 ;;
+    -e*)
+      ENV_PROFILE="${1#-e}"; shift ;;
+    --)
+      shift; break ;;
+    *)
+      break ;;
+  esac
+done
+
+# Set credential file based on environment
+if [[ -n "$ENV_PROFILE" ]]; then
+  CRED_FILE="${SFTP_ROOT}/config/credentials.${ENV_PROFILE}.yml"
+  if [[ -f "${SFTP_ROOT}/config/env/${ENV_PROFILE}.conf" ]]; then
+    # shellcheck source=/dev/null
+    source "${SFTP_ROOT}/config/env/${ENV_PROFILE}.conf"
+  fi
+else
+  CRED_FILE="${SFTP_ROOT}/config/credentials.yml"
+fi
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -52,7 +81,7 @@ case "$COMMAND" in
     cred_add "$1" "$2" "$3"
     ;;
   list)
-    echo "Stored credentials:"
+    echo "Credentials ($CRED_FILE):"
     cred_list
     ;;
   delete)
