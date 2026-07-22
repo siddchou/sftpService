@@ -1,0 +1,2 @@
+# Normalize line endings to LF on commit (Linux target)
+* text=eol=lf
