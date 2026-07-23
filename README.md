@@ -108,6 +108,174 @@ Credentials are encrypted with AES-256-GCM and stored in `config/credentials.yml
 ./scripts/sftp-download.sh -e dev fetch-backups
 ```
 
+## Examples
+
+### Example 1: Upload CSV reports to a remote server via SSH key
+
+```bash
+# Generate an SSH key
+./scripts/sftp-credential.sh gen-key reports-server ed25519
+
+# Store the key path as a credential
+./scripts/sftp-credential.sh -e prod add reports_key SSH_KEY "/opt/sftp-service/keys/reports-server"
+
+# Define the job in config/sftp-jobs.yml:
+#
+# jobs:
+#   - name: upload-reports
+#     host: sftp.example.com
+#     port: 22
+#     username: deployer
+#     credential_ref: reports_key
+#     remote_dir: /incoming/reports
+#     file_pattern: "*.csv"
+#     direction: UPLOAD
+#     remote_file_name: "${fileName}_${timestamp}.${fileExtension}"
+#     working_dir: /opt/sftp-service/data/reports
+
+# Place your CSV files in the working directory
+mkdir -p /opt/sftp-service/data/reports
+cp sales-2026.csv /opt/sftp-service/data/reports/
+
+# Run the upload
+./scripts/sftp-upload.sh -e prod upload-reports
+```
+
+The file `sales-2026.csv` will be uploaded as `sales-2026_20260722_143052.csv`.
+
+### Example 2: Download daily backup archives via password auth
+
+```bash
+# Store the password as a credential
+./scripts/sftp-credential.sh -e prod add backup_pass PASSWORD "MyS3cretP@ss"
+
+# Define the job in config/sftp-jobs.yml:
+#
+# jobs:
+#   - name: fetch-backups
+#     host: backup.internal.net
+#     port: 2222
+#     username: backup-agent
+#     credential_ref: backup_pass
+#     remote_dir: /exports/daily
+#     file_pattern: "backup_*.tar.gz"
+#     direction: DOWNLOAD
+#     working_dir: /opt/sftp-service/data/backups
+
+# Run the download
+./scripts/sftp-download.sh -e prod fetch-backups
+```
+
+All files matching `backup_*.tar.gz` from the remote `/exports/daily` directory will be downloaded locally.
+
+### Example 3: Run the same job across environments
+
+Define a base job in `config/sftp-jobs.yml`:
+
+```yaml
+jobs:
+  - name: sync-data
+    host: sftp.dev.example.com
+    username: data-user
+    credential_ref: dev_key
+    remote_dir: /data
+    file_pattern: "*.json"
+    direction: UPLOAD
+    working_dir: /opt/sftp-service/data/sync
+```
+
+Then override the host per environment in `config/sftp-jobs.prod.yml`:
+
+```yaml
+jobs:
+  - name: sync-data
+    host: sftp.prod.example.com
+    credential_ref: prod_key
+```
+
+Run against each environment:
+
+```bash
+./scripts/sftp-run.sh -e dev sync-data    # hits sftp.dev.example.com
+./scripts/sftp-run.sh -e prod sync-data   # hits sftp.prod.example.com
+```
+
+The environment-specific config merges with the base — only `host` and `credential_ref` change, all other fields are inherited.
+
+### Example 4: Set up a complete new environment
+
+```bash
+# 1. Create environment config
+cat > config/env/staging.conf <<'EOF'
+SFTP_DEFAULT_PORT=22
+SFTP_CONN_TIMEOUT=20
+SFTP_STRICT_HOST=true
+SFTP_LOG_RETENTION_DAYS=14
+SFTP_WORKING_DIR="/opt/sftp-service/data/staging"
+SFTP_LOG_DIR="/opt/sftp-service/logs/staging"
+SFTP_KEYS_DIR="/opt/sftp-service/keys/staging"
+EOF
+
+# 2. Create job overrides
+cat > config/sftp-jobs.staging.yml <<'EOF'
+jobs:
+  - name: upload-reports
+    host: sftp.staging.example.com
+    credential_ref: staging_key
+EOF
+
+# 3. Create credential store
+echo 'credentials: []' > config/credentials.staging.yml
+
+# 4. Add credentials
+./scripts/sftp-credential.sh -e staging gen-key staging-server ed25519
+./scripts/sftp-credential.sh -e staging add staging_key SSH_KEY "/opt/sftp-service/keys/staging/staging-server"
+
+# 5. Run
+./scripts/sftp-run.sh -e staging upload-reports
+```
+
+### Example 5: Customize timeouts and retries
+
+```bash
+# Override defaults for a slow connection
+export SFTP_CONN_TIMEOUT=60
+export SFTP_TRANSFER_TIMEOUT=600
+export SFTP_MAX_RETRIES=5
+export SFTP_RETRY_DELAY=10
+
+./scripts/sftp-run.sh -e prod upload-reports
+```
+
+### Example 6: Enable debug logging
+
+```bash
+export SFTP_DEBUG=true
+./scripts/sftp-run.sh -e dev upload-reports
+```
+
+Debug messages will appear in both the console output and the log file.
+
+### Example 7: Manage credentials
+
+```bash
+# List all credentials for an environment (safe — does not show values)
+./scripts/sftp-credential.sh -e prod list
+
+# Add a password credential
+./scripts/sftp-credential.sh -e dev add dev_api_pass PASSWORD "dev-password-here"
+
+# Update an existing credential (same ref overwrites the encrypted value)
+./scripts/sftp-credential.sh -e dev add dev_api_pass PASSWORD "new-password"
+
+# Remove a credential
+./scripts/sftp-credential.sh -e dev delete dev_api_pass
+
+# Generate different key types
+./scripts/sftp-credential.sh gen-key legacy-server rsa-4096
+./scripts/sftp-credential.sh gen-key modern-server ed25519
+```
+
 ## Multi-Environment Support
 
 The service supports four environments: `dev`, `sit`, `uat`, `prod`.
