@@ -49,6 +49,7 @@ cred_decrypt() {
       || die "Decryption failed."
   else
     # Not encrypted — return as-is (supports plain-text dev mode).
+    log_warn "Credential '${encrypted:0:12}…' is not encrypted (plaintext fallback)." 2>/dev/null || true
     echo "$encrypted"
   fi
 }

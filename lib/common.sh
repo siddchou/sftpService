@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # Resolve script root so lib/ can be sourced from any depth.
-SFTP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SFTP_ROOT="${SFTP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 # Source defaults if not already loaded.
 if [[ -z "${SFTP_DEFAULT_PORT:-}" ]]; then
@@ -104,10 +104,13 @@ expand_template() {
   name="$(file_base "$src_file")"
   ext="$(file_ext "$src_file")"
   ts="$(timestamp)"
-  template="${template//\$\{fileName\}/$name}"
-  template="${template//\$\{fileExtension\}/$ext}"
-  template="${template//\$\{timestamp\}/$ts}"
-  echo "$template"
+
+  # Use sed to avoid bash ${//} breaking on values containing //
+  printf '%s\n' "$template" \
+    | sed \
+        -e "s|\${fileName}|${name}|" \
+        -e "s|\${fileExtension}|${ext}|" \
+        -e "s|\${timestamp}|${ts}|"
 }
 
 # ── YAML helpers ─────────────────────────────────────────────────────────────

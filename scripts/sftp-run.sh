@@ -46,6 +46,11 @@ else
   CRED_FILE="${SFTP_ROOT}/config/credentials.yml"
 fi
 
+# ── Set up per-job log file (before log_rotate so debug messages are captured) ─
+
+LOG_FILE="${SFTP_LOG_DIR}/${ENV_PROFILE}_${JOB_NAME}_$(date '+%Y%m%d').log"
+log_set_file "$LOG_FILE"
+
 # ── Rotate old logs before starting ──────────────────────────────────────────
 
 log_rotate
@@ -61,12 +66,9 @@ if [[ ! -s "$JOB_JSON_FILE" ]]; then
   die "Job '$JOB_NAME' not found in sftp-jobs.yml${ENV_PROFILE:+ (or sftp-jobs.${ENV_PROFILE}.yml)}"
 fi
 
-# ── Set up per-job log file ──────────────────────────────────────────────────
+# ── Job start ────────────────────────────────────────────────────────────────
 
 JOB_HOST="$(yq -r '.host' "$JOB_JSON_FILE")"
-LOG_FILE="${SFTP_LOG_DIR}/${ENV_PROFILE}_${JOB_NAME}_$(date '+%Y%m%d').log"
-log_set_file "$LOG_FILE"
-
 log_info "=== Starting job: ${JOB_NAME} (env=${ENV_PROFILE}) ==="
 log_info "Host: ${JOB_HOST}, Log: ${LOG_FILE}"
 
