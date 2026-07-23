@@ -35,7 +35,8 @@ cred_decrypt() {
   require_env ORCHESTRATOR_ENCRYPTION_KEY
 
   # Parse ENC[AESGCM;iv;base64data]
-  if [[ "$encrypted" =~ ^ENC\[AESGCM;([0-9a-f]+);(.+)\]$ ]]; then
+  local regex='^ENC\[AESGCM;([0-9a-f]+);(.+)\]$'
+  if [[ "$encrypted" =~ $regex ]]; then
     local iv="${BASH_REMATCH[1]}"
     local ciphertext="${BASH_REMATCH[2]}"
     local key_hex="$ORCHESTRATOR_ENCRYPTION_KEY"

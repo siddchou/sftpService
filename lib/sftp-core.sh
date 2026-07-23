@@ -8,15 +8,21 @@
 
 # Build the common sftp command prefix from job config (JSON via stdin).
 # Usage: sftp_build_cmd < job_json
+# Populates _sftp_cmd_arr (array) and _sftp_cmd (string, for logging).
+_sftp_cmd_arr=()
 _sftp_cmd=""
 
 sftp_build_cmd() {
   local host port username auth_type auth_value
 
-  host="$(yq -r '.host' /dev/stdin)"
-  port="$(yq -r '.port // empty' /dev/stdin)"
-  username="$(yq -r '.username' /dev/stdin)"
-  auth_type="$(cred_type "$(yq -r '.credential_ref' /dev/stdin)")"
+  # Read stdin once — /dev/stdin gets consumed on pipe-backed inputs (Linux).
+  local job_json
+  job_json="$(cat)"
+
+  host="$(yq -r '.host' <<<"$job_json")"
+  port="$(yq -r '.port // empty' <<<"$job_json")"
+  username="$(yq -r '.username' <<<"$job_json")"
+  auth_type="$(cred_type "$(yq -r '.credential_ref' <<<"$job_json")")"
 
   port="${port:-$SFTP_DEFAULT_PORT}"
 
@@ -58,6 +64,7 @@ sftp_build_cmd() {
       ;;
   esac
 
+  _sftp_cmd_arr=(sftp "${ssh_opts[@]}" "${username}@${host}")
   _sftp_cmd="sftp ${ssh_opts[*]} ${username}@${host}"
 }
 
@@ -131,9 +138,9 @@ EOF
 
   local rc=0
   if [[ "$auth_type" == "PASSWORD" ]]; then
-    sshpass -p "$auth_value" sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null || rc=1
+    sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
   else
-    sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null || rc=1
+    "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
   fi
 
   rm -f "$batch_file"
@@ -212,15 +219,15 @@ sftp_ls() {
   batch_file="$(mktemp)"
 
   cat > "$batch_file" <<EOF
-ls ${remote_dir}
+ls "${remote_dir}"
 quit
 EOF
 
   local output
   if [[ "$auth_type" == "PASSWORD" ]]; then
-    output="$(sshpass -p "$auth_value" sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null)" || true
+    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
   else
-    output="$(sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null)" || true
+    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
   fi
 
   rm -f "$batch_file"
@@ -242,9 +249,9 @@ EOF
 
   local output
   if [[ "$auth_type" == "PASSWORD" ]]; then
-    output="$(sshpass -p "$auth_value" sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null)" || true
+    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
   else
-    output="$(sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null)" || true
+    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
   fi
 
   rm -f "$batch_file"
@@ -272,9 +279,9 @@ EOF
 
   local rc=0
   if [[ "$auth_type" == "PASSWORD" ]]; then
-    sshpass -p "$auth_value" sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null || rc=1
+    sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
   else
-    sftp -b "$batch_file" "$_sftp_cmd" 2>/dev/null || rc=1
+    "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
   fi
 
   rm -f "$batch_file"
