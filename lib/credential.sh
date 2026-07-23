@@ -58,23 +58,31 @@ cred_decrypt() {
 }
 
 # Verify the local openssl actually validates GCM auth tags.
-# Some openssl versions silently ignore a bad tag on decrypt.
+# Mirrors the real cred_encrypt/cred_decrypt path: raw openssl → base64 → store,
+# then on decrypt: base64 -d → openssl. We base64-encode, corrupt a b64 char,
+# decode, and confirm decryption rejects the tampered ciphertext.
 verify_gcm_integrity() {
   local test_key
   test_key="$(openssl rand -hex 32)"
   local test_iv
   test_iv="$(openssl rand -hex 12)"
 
-  local encrypted
-  encrypted="$(printf 'gcm-test' | openssl enc -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt 2>/dev/null)" || return 0
+  # Encrypt → base64 (matches cred_encrypt)
+  local b64
+  b64="$(printf 'gcm-test' \
+    | openssl enc -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt 2>/dev/null \
+    | base64 -w0)" || return 0
 
-  # Corrupt a byte in the middle of the ciphertext (truncation-safe)
-  local len=${#encrypted}
+  local len=${#b64}
   [[ "$len" -lt 4 ]] && return 0
+  # Corrupt a character in the middle of the base64 string
   local mid=$((len / 2))
-  local corrupted="${encrypted:0:mid}X${encrypted:mid+1}"
+  local corrupted="${b64:0:mid}X${b64:mid+1}"
 
-  if printf '%s' "$corrupted" | openssl enc -d -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt >/dev/null 2>&1; then
+  # base64 -d → openssl dec (matches cred_decrypt)
+  if printf '%s' "$corrupted" \
+    | base64 -d \
+    | openssl enc -d -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt >/dev/null 2>&1; then
     die "OpenSSL GCM integrity check failed: corrupted ciphertext was accepted. Your openssl version does not validate GCM auth tags. Upgrade openssl or switch to AES-256-CBC."
   fi
 }

@@ -188,11 +188,15 @@ put "${local_file}" "${dest_name}"
 quit
 EOF
 
-  local rc=0
-  _sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null || rc=1
-
+  local stderr_out=""
+  stderr_out="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>&1)" && {
+    rm -f "$batch_file"
+    return 0
+  }
+  # Log the last line of stderr for diagnostics (avoid flooding on retries)
+  log_debug "sftp-put stderr: $(printf '%s' "$stderr_out" | tail -1)"
   rm -f "$batch_file"
-  return "$rc"
+  return 1
 }
 
 # ── Download ──────────────────────────────────────────────────────────────────
@@ -271,6 +275,7 @@ sftp_download() {
 
   local download_output
   download_output="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>&1)" || true
+  log_debug "sftp-download output: $(printf '%s' "$download_output" | tail -3 | tr '\n' '; ')"
   rm -f "$batch_file"
 
   # 4. Verify which files arrived; compare sizes; report per-file OK/FAIL
@@ -383,9 +388,12 @@ get "${remote_file}"
 quit
 EOF
 
-  local rc=0
-  _sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null || rc=1
-
+  local stderr_out=""
+  stderr_out="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>&1)" && {
+    rm -f "$batch_file"
+    return 0
+  }
+  log_debug "sftp-get stderr: $(printf '%s' "$stderr_out" | tail -1)"
   rm -f "$batch_file"
-  return "$rc"
+  return 1
 }
