@@ -140,6 +140,31 @@ yq_read_job() {
   fi
 }
 
+# ── Common arg parsing ───────────────────────────────────────────────────────
+
+# Parse -e/--env flag from arguments.
+# Sets: ENV_PROFILE (may be empty), _LEFTOVER_ARGS array.
+# Usage: parse_env_args "$@"
+parse_env_args() {
+  ENV_PROFILE=""
+  _LEFTOVER_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -e|--env)
+        ENV_PROFILE="$2"; shift 2 ;;
+      -e*)
+        ENV_PROFILE="${1#-e}"; shift ;;
+      --)
+        shift; _LEFTOVER_ARGS=("$@"); break ;;
+      -*)
+        die "Unknown option: $1" ;;
+      *)
+        _LEFTOVER_ARGS=("$@"); break ;;
+    esac
+  done
+}
+
 # ── Signal handling ──────────────────────────────────────────────────────────
 
 _CANCELLED=false

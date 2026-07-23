@@ -17,23 +17,8 @@ install_cancel_trap
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
-ENV_PROFILE=""
-JOB_NAME=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -e|--env)
-      ENV_PROFILE="$2"; shift 2 ;;
-    -e*)
-      ENV_PROFILE="${1#-e}"; shift ;;
-    --)
-      shift; JOB_NAME="${1:-}" ; break ;;
-    -*)
-      die "Unknown option: $1. Usage: sftp-run.sh [-e <env>] <job-name>" ;;
-    *)
-      JOB_NAME="$1"; shift ;;
-  esac
-done
+parse_env_args "$@"
+JOB_NAME="${_LEFTOVER_ARGS[0]:-}"
 
 if [[ -z "$JOB_NAME" ]]; then
   die "Usage: sftp-run.sh [-e <env>] <job-name>"

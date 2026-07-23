@@ -42,20 +42,7 @@ EOF
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
-ENV_PROFILE=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -e|--env)
-      ENV_PROFILE="$2"; shift 2 ;;
-    -e*)
-      ENV_PROFILE="${1#-e}"; shift ;;
-    --)
-      shift; break ;;
-    *)
-      break ;;
-  esac
-done
+parse_env_args "$@"
 
 # Set credential file based on environment
 if [[ -n "$ENV_PROFILE" ]]; then
@@ -68,37 +55,38 @@ else
   CRED_FILE="${SFTP_ROOT}/config/credentials.yml"
 fi
 
-if [[ $# -lt 1 ]]; then
+if [[ "${#_LEFTOVER_ARGS[@]}" -lt 1 ]]; then
   usage
   exit 1
 fi
 
-COMMAND="$1"; shift
+COMMAND="${_LEFTOVER_ARGS[0]}"
+_rest=("${_LEFTOVER_ARGS[@]:1}")
 
 case "$COMMAND" in
   add)
-    [[ $# -ge 3 ]] || die "add requires: <ref> <type> <value>"
-    cred_add "$1" "$2" "$3"
+    [[ "${#_rest[@]}" -ge 3 ]] || die "add requires: <ref> <type> <value>"
+    cred_add "${_rest[0]}" "${_rest[1]}" "${_rest[2]}"
     ;;
   list)
     echo "Credentials ($CRED_FILE):"
     cred_list
     ;;
   delete)
-    [[ $# -ge 1 ]] || die "delete requires: <ref>"
-    cred_delete "$1"
+    [[ "${#_rest[@]}" -ge 1 ]] || die "delete requires: <ref>"
+    cred_delete "${_rest[0]}"
     ;;
   gen-key)
-    [[ $# -ge 1 ]] || die "gen-key requires: <name>"
-    generate_ssh_key "$1" "${2:-ed25519}"
+    [[ "${#_rest[@]}" -ge 1 ]] || die "gen-key requires: <name>"
+    generate_ssh_key "${_rest[0]}" "${_rest[1]:-ed25519}"
     ;;
   encrypt)
-    [[ $# -ge 1 ]] || die "encrypt requires: <plaintext>"
-    cred_encrypt "$1"
+    [[ "${#_rest[@]}" -ge 1 ]] || die "encrypt requires: <plaintext>"
+    cred_encrypt "${_rest[0]}"
     ;;
   decrypt)
-    [[ $# -ge 1 ]] || die "decrypt requires: <encrypted_value>"
-    cred_decrypt "$1"
+    [[ "${#_rest[@]}" -ge 1 ]] || die "decrypt requires: <encrypted_value>"
+    cred_decrypt "${_rest[0]}"
     ;;
   help|--help|-h)
     usage

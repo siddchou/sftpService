@@ -29,6 +29,7 @@ sftp_build_cmd() {
   local ssh_opts=(
     -P "$port"
     -o ConnectTimeout="$SFTP_CONN_TIMEOUT"
+    -o LoginTimeout="$SFTP_AUTH_TIMEOUT"
     -o ServerAliveInterval=60
     -o ServerAliveCountMax=3
   )
@@ -64,8 +65,27 @@ sftp_build_cmd() {
       ;;
   esac
 
-  _sftp_cmd_arr=(sftp "${ssh_opts[@]}" "${username}@${host}")
-  _sftp_cmd="sftp ${ssh_opts[*]} ${username}@${host}"
+  _sftp_cmd_arr=(timeout "$SFTP_TRANSFER_TIMEOUT" sftp "${ssh_opts[@]}" "${username}@${host}")
+  _sftp_cmd="timeout $SFTP_TRANSFER_TIMEOUT sftp ${ssh_opts[*]} ${username}@${host}"
+}
+
+# ── Retry helper ──────────────────────────────────────────────────────────────
+
+# Run a command with retries. Wraps _sftp_put and _sftp_get.
+# Args: <command> [args...]
+_sftp_retry() {
+  local attempts=1
+  while [[ "$attempts" -le "$SFTP_MAX_RETRIES" ]]; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempts" -lt "$SFTP_MAX_RETRIES" ]]; then
+      log_warn "Attempt $attempts/$SFTP_MAX_RETRIES failed, retrying in ${SFTP_RETRY_DELAY}s…"
+      sleep "$SFTP_RETRY_DELAY"
+    fi
+    ((attempts++))
+  done
+  return 1
 }
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -111,7 +131,7 @@ sftp_upload() {
     local file_size
     file_size="$(du -k "$local_file" | cut -f1)"
 
-    if _sftp_put "$local_file" "$remote_dir" "$dest_name" "$auth_type" "$auth_value"; then
+    if _sftp_retry _sftp_put "$local_file" "$remote_dir" "$dest_name" "$auth_type" "$auth_value"; then
       log_info "OK ${basename} (${file_size}KB) -> ${dest_name}"
       ((transferred++))
     else
@@ -150,6 +170,7 @@ EOF
 # ── Download ──────────────────────────────────────────────────────────────────
 
 # Download files matching pattern from remote_dir to working_dir.
+# Uses 2 connections: one ls -l, one batch get (regardless of file count).
 # Args: <job_json_path> <auth_value>
 sftp_download() {
   local job_json="$1"
@@ -169,50 +190,99 @@ sftp_download() {
 
   [[ -d "$working_dir" ]] || die "Working directory does not exist: $working_dir"
 
-  # List remote files matching pattern
-  local remote_files
-  remote_files="$(sftp_ls "$remote_dir" "$auth_type" "$auth_value")" || {
+  # 1. Single ls -l to get file list + sizes (connection #1)
+  local ls_output
+  ls_output="$(sftp_ls_long "$remote_dir" "$auth_type" "$auth_value")" || {
     die "Failed to list remote directory: ${remote_dir}"
   }
 
+  # 2. Parse listing: collect matching files and their sizes
+  local -a match_names=()
+  local -A match_sizes=()
+  local regex
+  regex="$(echo "$file_pattern" | sed 's/\*/.*/g; s/\?/./g')"
+
+  while read -r _perms _links _owner _group _bytes _mon _day _time _name; do
+    [[ -z "$_name" || "$_name" == "." || "$_name" == ".." ]] && continue
+    if echo "$_name" | grep -q "$regex" 2>/dev/null; then
+      match_names+=("$_name")
+      match_sizes["$_name"]=$(( _bytes / 1024 ))
+    fi
+  done <<< "$ls_output"
+
+  if [[ ${#match_names[@]} -eq 0 ]]; then
+    log_info "No files matching pattern '${file_pattern}' found."
+    return 0
+  fi
+
+  # 3. Build batch get for all matching files (connection #2)
+  local batch_file
+  batch_file="$(mktemp)"
+  printf 'lcd "%s"\n' "$working_dir" >> "$batch_file"
+  printf 'cd "%s"\n' "$remote_dir" >> "$batch_file"
+  for fname in "${match_names[@]}"; do
+    printf 'get "%s"\n' "$fname" >> "$batch_file"
+  done
+  printf 'quit\n' >> "$batch_file"
+
+  local download_output
+  if [[ "$auth_type" == "PASSWORD" ]]; then
+    download_output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>&1)" || true
+  else
+    download_output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>&1)" || true
+  fi
+  rm -f "$batch_file"
+
+  # 4. Verify which files arrived; report per-file OK/FAIL
   local transferred=0
   local failed=0
 
-  while IFS= read -r remote_file; do
-    [[ -z "$remote_file" ]] && continue
-
-    # Filter by pattern (bash glob match)
-    local basename
-    basename="$(basename "$remote_file")"
-
-    # Use find to match the glob pattern
-    if ! echo "$basename" | grep -q "$(echo "$file_pattern" | sed 's/\*/.*/g; s/\?/./g')" 2>/dev/null; then
-      continue
-    fi
-
+  for fname in "${match_names[@]}"; do
     if is_cancelled; then
       log_warn "Download cancelled by user."
       break
     fi
 
-    local file_size
-    file_size="$(sftp_size "$remote_file" "$auth_type" "$auth_value")"
-    file_size="${file_size:-?}"
+    local file_size="${match_sizes[$fname]:-?}"
 
-    if _sftp_get "$remote_dir" "$basename" "$working_dir" "$auth_type" "$auth_value"; then
-      log_info "OK ${basename} (${file_size}KB)"
+    if [[ -f "$working_dir/$fname" ]]; then
+      log_info "OK ${fname} (${file_size}KB)"
       ((transferred++))
     else
-      log_error "FAIL ${basename}"
+      log_error "FAIL ${fname}"
       ((failed++))
     fi
-  done <<< "$remote_files"
+  done
 
   log_info "Download summary: ${transferred} succeeded, ${failed} failed"
   return "$failed"
 }
 
-# List files in remote directory.
+# List remote directory with ls -l (raw output).
+sftp_ls_long() {
+  local remote_dir="$1" auth_type="$2" auth_value="$3"
+  local batch_file
+  batch_file="$(mktemp)"
+
+  cat > "$batch_file" <<EOF
+ls -l "${remote_dir}"
+quit
+EOF
+
+  local output
+  if [[ "$auth_type" == "PASSWORD" ]]; then
+    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
+  else
+    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
+  fi
+
+  rm -f "$batch_file"
+
+  # Return raw ls -l lines (filter sftp prompts)
+  echo "$output" | grep -vE '^[sS]FTP|^[0-9]+ bytes|Cannot' || true
+}
+
+# List files in remote directory (simple names).
 sftp_ls() {
   local remote_dir="$1" auth_type="$2" auth_value="$3"
   local batch_file
@@ -256,7 +326,7 @@ EOF
 
   rm -f "$batch_file"
 
-  # Extract size (4th field in ls -l output) and convert to KB
+  # Extract size (5th field in ls -l output) and convert to KB
   local bytes
   bytes="$(echo "$output" | awk '{print $5}')"
   if [[ -n "$bytes" && "$bytes" =~ ^[0-9]+$ ]]; then
