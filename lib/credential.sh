@@ -48,22 +48,56 @@ cred_decrypt() {
           -nosalt 2>/dev/null \
       || die "Decryption failed."
   else
-    # Not encrypted — return as-is (supports plain-text dev mode).
-    log_warn "Credential '${encrypted:0:12}…' is not encrypted (plaintext fallback)." 2>/dev/null || true
+    # Not encrypted — return as-is only when explicitly allowed.
+    echo "WARNING: Credential value is not encrypted (plaintext)." >&2
+    if [[ "${SFTP_ALLOW_PLAINTEXT_CREDS:-false}" != "true" ]]; then
+      die "Plaintext credentials are not allowed. Set SFTP_ALLOW_PLAINTEXT_CREDS=true to override, or encrypt the credential with 'sftp-credential.sh encrypt'."
+    fi
     echo "$encrypted"
+  fi
+}
+
+# Verify the local openssl actually validates GCM auth tags.
+# Some openssl versions silently ignore a bad tag on decrypt.
+verify_gcm_integrity() {
+  local test_key
+  test_key="$(openssl rand -hex 32)"
+  local test_iv
+  test_iv="$(openssl rand -hex 12)"
+
+  local encrypted
+  encrypted="$(printf 'gcm-test' | openssl enc -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt 2>/dev/null)" || return 0
+
+  # Corrupt a byte in the middle of the ciphertext (truncation-safe)
+  local len=${#encrypted}
+  [[ "$len" -lt 4 ]] && return 0
+  local mid=$((len / 2))
+  local corrupted="${encrypted:0:mid}X${encrypted:mid+1}"
+
+  if printf '%s' "$corrupted" | openssl enc -d -aes-256-gcm -K "$test_key" -iv "$test_iv" -nosalt >/dev/null 2>&1; then
+    die "OpenSSL GCM integrity check failed: corrupted ciphertext was accepted. Your openssl version does not validate GCM auth tags. Upgrade openssl or switch to AES-256-CBC."
   fi
 }
 
 # ── Credential Store (YAML) ─────────────────────────────────────────────────
 
+# Validate a credential ref — must be a safe identifier.
+_validate_cred_ref() {
+  local cred_ref="$1"
+  if [[ ! "$cred_ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    die "Invalid credential ref '$cred_ref': must match ^[A-Za-z0-9._/-]+$"
+  fi
+}
+
 # Resolve a credential by ref name → decrypted value
 resolve_credential() {
   local cred_ref="$1"
+  _validate_cred_ref "$cred_ref"
   [[ -f "$CRED_FILE" ]] || die "Credential file not found: $CRED_FILE"
   require_yq
 
   local raw_value
-  raw_value="$(yq -r ".credentials[] | select(.ref == \"$cred_ref\") | .value" "$CRED_FILE")"
+  raw_value="$(yq -r --arg ref "$cred_ref" '.credentials[] | select(.ref == $ref) | .value' "$CRED_FILE")"
 
   if [[ -z "$raw_value" ]]; then
     die "Credential ref '$cred_ref' not found in $CRED_FILE"
@@ -75,14 +109,16 @@ resolve_credential() {
 # Get credential type by ref.
 cred_type() {
   local cred_ref="$1"
+  _validate_cred_ref "$cred_ref"
   [[ -f "$CRED_FILE" ]] || die "Credential file not found: $CRED_FILE"
   require_yq
-  yq -r ".credentials[] | select(.ref == \"$cred_ref\") | .type" "$CRED_FILE"
+  yq -r --arg ref "$cred_ref" '.credentials[] | select(.ref == $ref) | .type' "$CRED_FILE"
 }
 
 # Add or update a credential in the store.
 cred_add() {
   local cred_ref="$1" cred_type="$2" plaintext="$3"
+  _validate_cred_ref "$cred_ref"
   [[ -f "$CRED_FILE" ]] || die "Credential file not found: $CRED_FILE"
   require_yq
 
@@ -91,15 +127,16 @@ cred_add() {
 
   # Check if ref exists — update in place.
   local existing
-  existing="$(yq -r ".credentials[] | select(.ref == \"$cred_ref\") | .ref" "$CRED_FILE")"
+  existing="$(yq -r --arg ref "$cred_ref" '.credentials[] | select(.ref == $ref) | .ref' "$CRED_FILE")"
 
   if [[ -n "$existing" ]]; then
-    yq -i ".credentials[] | select(.ref == \"$cred_ref\") | .value = \"$encrypted\"" "$CRED_FILE"
+    yq -i --arg ref "$cred_ref" --arg val "$encrypted" '.credentials[] | select(.ref == $ref) | .value = $val' "$CRED_FILE"
     log_info "Updated credential '$cred_ref'."
   else
-    yq -i ".credentials += [{\"ref\": \"$cred_ref\", \"type\": \"$cred_type\", \"value\": \"$encrypted\"}]" "$CRED_FILE"
+    yq -i --arg ref "$cred_ref" --arg type "$cred_type" --arg val "$encrypted" '.credentials += [{"ref": $ref, "type": $type, "value": $val}]' "$CRED_FILE"
     log_info "Added credential '$cred_ref' (type: $cred_type)."
   fi
+  chmod 600 "$CRED_FILE" 2>/dev/null || true
 }
 
 # List all credential refs and types (no values).
@@ -112,9 +149,10 @@ cred_list() {
 # Delete a credential by ref.
 cred_delete() {
   local cred_ref="$1"
+  _validate_cred_ref "$cred_ref"
   [[ -f "$CRED_FILE" ]] || die "Credential file not found: $CRED_FILE"
   require_yq
-  yq -i "del(.credentials[] | select(.ref == \"$cred_ref\"))" "$CRED_FILE"
+  yq -i --arg ref "$cred_ref" 'del(.credentials[] | select(.ref == $ref))' "$CRED_FILE"
   log_info "Deleted credential '$cred_ref'."
 }
 

@@ -15,6 +15,12 @@ source "${SFTP_ROOT}/lib/sftp-core.sh"
 
 install_cancel_trap
 
+# ── Verify crypto integrity ──────────────────────────────────────────────────
+
+if [[ -n "${ORCHESTRATOR_ENCRYPTION_KEY:-}" ]]; then
+  verify_gcm_integrity
+fi
+
 # ── Parse args ───────────────────────────────────────────────────────────────
 
 parse_env_args "$@"
@@ -50,6 +56,18 @@ fi
 
 LOG_FILE="${SFTP_LOG_DIR}/${ENV_PROFILE}_${JOB_NAME}_$(date '+%Y%m%d').log"
 log_set_file "$LOG_FILE"
+# Harden log file permissions on multi-user hosts
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+
+# ── Concurrency guard (flock) ────────────────────────────────────────────────
+
+mkdir -p "${SFTP_LOCK_DIR:-$SFTP_LOG_DIR}/locks"
+LOCK_FILE="${SFTP_LOCK_DIR:-$SFTP_LOG_DIR}/locks/${ENV_PROFILE}_${JOB_NAME}.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  die "Job '${JOB_NAME}' (env=${ENV_PROFILE}) is already running (lock: ${LOCK_FILE})"
+fi
+# Lock auto-released when fd 9 closes on exit
 
 # ── Rotate old logs before starting ──────────────────────────────────────────
 

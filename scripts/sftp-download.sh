@@ -17,14 +17,14 @@ if [[ -z "$JOB_NAME" ]]; then
 fi
 
 # Validate direction before running
-BASE_DIR="$(yq -r ".jobs[] | select(.name == \"${JOB_NAME}\") | .direction" \
+BASE_DIR="$(yq -r --arg name "$JOB_NAME" '.jobs[] | select(.name == $name) | .direction' \
   "${SFTP_ROOT}/config/sftp-jobs.yml")"
 
 ENV_DIR=""
 if [[ -n "$ENV_PROFILE" ]]; then
   ENV_FILE="${SFTP_ROOT}/config/sftp-jobs.${ENV_PROFILE}.yml"
   if [[ -f "$ENV_FILE" ]]; then
-    ENV_DIR="$(yq -r ".jobs[] | select(.name == \"${JOB_NAME}\") | .direction" "$ENV_FILE")"
+    ENV_DIR="$(yq -r --arg name "$JOB_NAME" '.jobs[] | select(.name == $name) | .direction' "$ENV_FILE")"
   fi
 fi
 

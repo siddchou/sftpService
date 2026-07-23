@@ -13,7 +13,7 @@ _sftp_cmd_arr=()
 _sftp_cmd=""
 
 sftp_build_cmd() {
-  local host port username auth_type auth_value
+  local host port username auth_type auth_value cred_ref
 
   # Read stdin once — /dev/stdin gets consumed on pipe-backed inputs (Linux).
   local job_json
@@ -22,7 +22,9 @@ sftp_build_cmd() {
   host="$(yq -r '.host' <<<"$job_json")"
   port="$(yq -r '.port // empty' <<<"$job_json")"
   username="$(yq -r '.username' <<<"$job_json")"
-  auth_type="$(cred_type "$(yq -r '.credential_ref' <<<"$job_json")")"
+  cred_ref="$(yq -r '.credential_ref' <<<"$job_json")"
+  auth_type="$(cred_type "$cred_ref")"
+  auth_value="$(resolve_credential "$cred_ref")"
 
   port="${port:-$SFTP_DEFAULT_PORT}"
 
@@ -69,6 +71,22 @@ sftp_build_cmd() {
   _sftp_cmd="timeout $SFTP_TRANSFER_TIMEOUT sftp ${ssh_opts[*]} ${username}@${host}"
 }
 
+# ── Auth helper ───────────────────────────────────────────────────────────────
+
+# Run the sftp command with proper auth. Uses sshpass -e (env var) for PASSWORD
+# to avoid exposing the password in the process list.
+# Args: <batch_file>
+# Returns: stdout from sftp on success, exit code via $?.
+_sftp_exec() {
+  local batch_file="$1" auth_type="$2" auth_value="$3"
+
+  if [[ "$auth_type" == "PASSWORD" ]]; then
+    SSHPASS="$auth_value" sshpass -e "${_sftp_cmd_arr[@]}" -b "$batch_file"
+  else
+    "${_sftp_cmd_arr[@]}" -b "$batch_file"
+  fi
+}
+
 # ── Retry helper ──────────────────────────────────────────────────────────────
 
 # Run a command with retries. Wraps _sftp_put and _sftp_get.
@@ -81,9 +99,17 @@ _sftp_retry() {
     fi
     if [[ "$attempts" -lt "$SFTP_MAX_RETRIES" ]]; then
       log_warn "Attempt $attempts/$SFTP_MAX_RETRIES failed, retrying in ${SFTP_RETRY_DELAY}s…"
-      sleep "$SFTP_RETRY_DELAY"
+      # Check cancellation during backoff sleep (1s granularity)
+      local _count=0
+      while [[ $_count -lt "$SFTP_RETRY_DELAY" ]]; do
+        if is_cancelled; then
+          return 2
+        fi
+        sleep 1
+        _count=$((_count + 1))
+      done
     fi
-    ((attempts++))
+    attempts=$((attempts + 1))
   done
   return 1
 }
@@ -92,6 +118,7 @@ _sftp_retry() {
 
 # Upload files matching pattern from working_dir to remote_dir.
 # Args: <job_json_path> <auth_value>
+# Returns: 0 if all files succeeded, non-zero if any file failed.
 sftp_upload() {
   local job_json="$1"
   local auth_value="$2"
@@ -131,12 +158,17 @@ sftp_upload() {
     local file_size
     file_size="$(du -k "$local_file" | cut -f1)"
 
-    if _sftp_retry _sftp_put "$local_file" "$remote_dir" "$dest_name" "$auth_type" "$auth_value"; then
-      log_info "OK ${basename} (${file_size}KB) -> ${dest_name}"
-      ((transferred++))
-    else
+    local retry_rc=0
+    _sftp_retry _sftp_put "$local_file" "$remote_dir" "$dest_name" "$auth_type" "$auth_value" || retry_rc=$?
+    if [[ "$retry_rc" -eq 2 ]]; then
+      log_warn "Upload cancelled by user."
+      break
+    elif [[ "$retry_rc" -ne 0 ]]; then
       log_error "FAIL ${basename} -> ${dest_name}"
-      ((failed++))
+      failed=$((failed + 1))
+    else
+      log_info "OK ${basename} (${file_size}KB) -> ${dest_name}"
+      transferred=$((transferred + 1))
     fi
   done < <(find "$working_dir" -maxdepth 1 -type f -name "$file_pattern" -print0 2>/dev/null)
 
@@ -151,17 +183,13 @@ _sftp_put() {
   batch_file="$(mktemp)"
 
   cat > "$batch_file" <<EOF
-cd ${remote_dir}
+cd "${remote_dir}"
 put "${local_file}" "${dest_name}"
 quit
 EOF
 
   local rc=0
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
-  else
-    "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
-  fi
+  _sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null || rc=1
 
   rm -f "$batch_file"
   return "$rc"
@@ -172,6 +200,7 @@ EOF
 # Download files matching pattern from remote_dir to working_dir.
 # Uses 2 connections: one ls -l, one batch get (regardless of file count).
 # Args: <job_json_path> <auth_value>
+# Returns: 0 if all files succeeded, non-zero if any file failed.
 sftp_download() {
   local job_json="$1"
   local auth_value="$2"
@@ -197,16 +226,31 @@ sftp_download() {
   }
 
   # 2. Parse listing: collect matching files and their sizes
+  # Assumption: ls -l output has 9 space-separated fields:
+  #   perms links owner group bytes mon day time name
+  # This matches OpenSSH sftp-server. Non-OpenSSH servers may differ.
   local -a match_names=()
   local -A match_sizes=()
+  local -A match_bytes=()
+  # Convert glob pattern to anchored regex:
+  # 1. Escape regex metacharacters (., [, ], (, ), {, }, +, ^, $, |, \)
+  # 2. Convert glob wildcards (* → .*, ? → .)
+  # 3. Anchor with ^...$
   local regex
-  regex="$(echo "$file_pattern" | sed 's/\*/.*/g; s/\?/./g')"
+  regex="$(printf '%s' "$file_pattern" | sed \
+    -e 's/[][{}().^$|+\\]/\\&/g' \
+    -e 's/\*/.*/g' \
+    -e 's/?/./g')"
+  regex="^${regex}$"
 
   while read -r _perms _links _owner _group _bytes _mon _day _time _name; do
     [[ -z "$_name" || "$_name" == "." || "$_name" == ".." ]] && continue
-    if echo "$_name" | grep -q "$regex" 2>/dev/null; then
+    # P2-1: Only match regular files (perms start with '-')
+    [[ "${_perms:0:1}" == "-" ]] || continue
+    if printf '%s' "$_name" | grep -qE "$regex" 2>/dev/null; then
       match_names+=("$_name")
       match_sizes["$_name"]=$(( _bytes / 1024 ))
+      match_bytes["$_name"]="$_bytes"
     fi
   done <<< "$ls_output"
 
@@ -226,14 +270,10 @@ sftp_download() {
   printf 'quit\n' >> "$batch_file"
 
   local download_output
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    download_output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>&1)" || true
-  else
-    download_output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>&1)" || true
-  fi
+  download_output="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>&1)" || true
   rm -f "$batch_file"
 
-  # 4. Verify which files arrived; report per-file OK/FAIL
+  # 4. Verify which files arrived; compare sizes; report per-file OK/FAIL
   local transferred=0
   local failed=0
 
@@ -244,13 +284,21 @@ sftp_download() {
     fi
 
     local file_size="${match_sizes[$fname]:-?}"
+    local expected_bytes="${match_bytes[$fname]:-0}"
 
     if [[ -f "$working_dir/$fname" ]]; then
-      log_info "OK ${fname} (${file_size}KB)"
-      ((transferred++))
+      local actual_bytes
+      actual_bytes="$(stat -c%s "$working_dir/$fname" 2>/dev/null)" || actual_bytes=-1
+      if [[ "$actual_bytes" -ge 0 && "$expected_bytes" -ge 0 && "$actual_bytes" -ne "$expected_bytes" ]]; then
+        log_error "FAIL ${fname} (size mismatch: expected ${expected_bytes}B, got ${actual_bytes}B)"
+        failed=$((failed + 1))
+      else
+        log_info "OK ${fname} (${file_size}KB)"
+        transferred=$((transferred + 1))
+      fi
     else
       log_error "FAIL ${fname}"
-      ((failed++))
+      failed=$((failed + 1))
     fi
   done
 
@@ -270,11 +318,7 @@ quit
 EOF
 
   local output
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  else
-    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  fi
+  output="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null)" || true
 
   rm -f "$batch_file"
 
@@ -294,11 +338,7 @@ quit
 EOF
 
   local output
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  else
-    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  fi
+  output="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null)" || true
 
   rm -f "$batch_file"
 
@@ -318,11 +358,7 @@ quit
 EOF
 
   local output
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    output="$(sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  else
-    output="$( "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null)" || true
-  fi
+  output="$(_sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null)" || true
 
   rm -f "$batch_file"
 
@@ -341,18 +377,14 @@ _sftp_get() {
   batch_file="$(mktemp)"
 
   cat > "$batch_file" <<EOF
-lcd ${local_dir}
-cd ${remote_dir}
+lcd "${local_dir}"
+cd "${remote_dir}"
 get "${remote_file}"
 quit
 EOF
 
   local rc=0
-  if [[ "$auth_type" == "PASSWORD" ]]; then
-    sshpass -p "$auth_value" "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
-  else
-    "${_sftp_cmd_arr[@]}" -b "$batch_file" 2>/dev/null || rc=1
-  fi
+  _sftp_exec "$batch_file" "$auth_type" "$auth_value" 2>/dev/null || rc=1
 
   rm -f "$batch_file"
   return "$rc"

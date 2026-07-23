@@ -117,6 +117,12 @@ expand_template() {
 
 require_yq() {
   require_cmd yq
+  # Verify go-yq (not python-yq which has incompatible syntax)
+  local yq_version
+  yq_version="$(yq --version 2>/dev/null)" || true
+  if [[ "$yq_version" == *"python"* ]]; then
+    die "python-yq detected. This project requires go-yq (mikefarah/yq). See https://github.com/mikefarah/yq/#install"
+  fi
 }
 
 # Read a job config block from sftp-jobs.yml, merged with env override if present.
@@ -134,12 +140,12 @@ yq_read_job() {
       # Merge: env override wins for same job name
       yq -o json -n \
         "$(yq -o json "$jobs_file") *+ $(yq -o json "$env_file")" \
-        | yq -o json ".jobs[] | select(.name == \"$job_name\")"
+        | yq -o json --arg name "$job_name" '.jobs[] | select(.name == $name)'
     else
-      yq -o json ".jobs[] | select(.name == \"$job_name\")" "$jobs_file"
+      yq -o json --arg name "$job_name" '.jobs[] | select(.name == $name)' "$jobs_file"
     fi
   else
-    yq -o json ".jobs[] | select(.name == \"$job_name\")" "$jobs_file"
+    yq -o json --arg name "$job_name" '.jobs[] | select(.name == $name)' "$jobs_file"
   fi
 }
 
